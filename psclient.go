@@ -22,21 +22,21 @@ import (
 )
 
 const (
-	k8Token      = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	K8CaCert     = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	k8Token  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	K8CaCert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
 // projectID is set from the GCP_PROJECT environment variable
 var (
-	projectID string
-    jenkinsWebhookUrl string
-    retryCount int
-    secretPath string
-    subName string
-    topicName string
-    vaultAddress string
-	vaultRole string
-	retryInterval time.Duration
+	projectID         string
+	jenkinsWebhookUrl string
+	retryCount        int
+	secretPath        string
+	subName           string
+	topicName         string
+	vaultAddress      string
+	vaultRole         string
+	retryInterval     time.Duration
 )
 
 // global logger
@@ -51,60 +51,60 @@ var ctx = context.Background()
 
 func main() {
 	//get required Env Vars and fail pod start if we dont
-    projectID = os.Getenv("GCP_PROJECT")
-    if projectID == "" {
-    	logger.Fatal("Failed to get GCP_PROJECT")
-    }
-     
+	projectID = os.Getenv("GCP_PROJECT")
+	if projectID == "" {
+		logger.Fatal("Failed to get GCP_PROJECT")
+	}
+
 	jenkinsWebhookUrl = os.Getenv("JENKINS_URL")
-    if jenkinsWebhookUrl == "" {
-    	logger.Fatal("Failed to get JENKINS_URL")
-    }
+	if jenkinsWebhookUrl == "" {
+		logger.Fatal("Failed to get JENKINS_URL")
+	}
 
-    if !valid.IsURL(jenkinsWebhookUrl){
-        logger.Fatal("JENKINS_URL is invalid") 
-    }
+	if !valid.IsURL(jenkinsWebhookUrl) {
+		logger.Fatal("JENKINS_URL is invalid")
+	}
 
-    secretPath = os.Getenv("VAULT_SECRET_PATH")
-    if secretPath == "" {
-    	logger.Fatal("Failed to get VAULT_SECRET_PATH")
-    }
+	secretPath = os.Getenv("VAULT_SECRET_PATH")
+	if secretPath == "" {
+		logger.Fatal("Failed to get VAULT_SECRET_PATH")
+	}
 
-    vaultAddress = os.Getenv("VAULT_ADDRESS")
-    if vaultAddress == "" {
-    	logger.Fatal("Failed to get VAULT_ADDRESS")
-    }
+	vaultAddress = os.Getenv("VAULT_ADDRESS")
+	if vaultAddress == "" {
+		logger.Fatal("Failed to get VAULT_ADDRESS")
+	}
 
-    if !valid.IsURL(vaultAddress){
-        logger.Fatal("VAULT_ADDRESS is invalid") 
-    }
+	if !valid.IsURL(vaultAddress) {
+		logger.Fatal("VAULT_ADDRESS is invalid")
+	}
 
-    vaultRole = os.Getenv("VAULT_ROLE")
-    if vaultRole == "" {
-    	logger.Fatal("Failed to get VAULT_ROLE")
-    }
+	vaultRole = os.Getenv("VAULT_ROLE")
+	if vaultRole == "" {
+		logger.Fatal("Failed to get VAULT_ROLE")
+	}
 
-    subName = os.Getenv("SUBSCRIPTION_NAME")
-    if subName == "" {
-    	logger.Fatal("Failed to get SUBSCRIPTION_NAME")
-    }
+	subName = os.Getenv("SUBSCRIPTION_NAME")
+	if subName == "" {
+		logger.Fatal("Failed to get SUBSCRIPTION_NAME")
+	}
 
-    topicName = os.Getenv("TOPIC_NAME")
+	topicName = os.Getenv("TOPIC_NAME")
 	if topicName == "" {
 		logger.Fatal("Failed to get TOPIC_NAME")
 	}
 
-    retryAttempts, err := strconv.Atoi(os.Getenv("RETRY_COUNT"))
-    if err != nil {
-        logger.Fatal("RETRY_COUNT is invalid")
-    }
-    retryCount = retryAttempts
+	retryAttempts, err := strconv.Atoi(os.Getenv("RETRY_COUNT"))
+	if err != nil {
+		logger.Fatal("RETRY_COUNT is invalid")
+	}
+	retryCount = retryAttempts
 
-    retryInt, err := strconv.Atoi(os.Getenv("RETRY_INTERVAL"))
-    if err != nil {
-        logger.Fatal("RETRY_INTERVAL is invalid")
-    }
-    retryInterval = time.Duration(retryInt) * time.Second
+	retryInt, err := strconv.Atoi(os.Getenv("RETRY_INTERVAL"))
+	if err != nil {
+		logger.Fatal("RETRY_INTERVAL is invalid")
+	}
+	retryInterval = time.Duration(retryInt) * time.Second
 	// Log as JSON instead of the default ASCII formatter.
 	log.SetFormatter(&log.JSONFormatter{})
 	// Output to stdout instead of the default stderr
@@ -131,7 +131,7 @@ func subscribe() error {
 	ctx, cancel := context.WithCancel(ctx)
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 		msg.Ack()
-    	logger.WithFields(log.Fields{"message-id": msg.ID}).Info("Got message: Deconstructing...")
+		logger.WithFields(log.Fields{"message-id": msg.ID}).Info("Got message: Deconstructing...")
 		payload, githubEventheader, invokeToken, err := constructHttpMsg(msg.Data)
 		//calculate the signature based on the content and secret
 		gitXheader := "sha1=" + ComputeHmac(string(payload), secret)
@@ -145,15 +145,19 @@ func subscribe() error {
 			jenkinsStatus, err := sendToJenkins(payload, gitXheader, githubEventheader, invokeToken)
 			if err != nil {
 				logger.WithFields(log.Fields{"error": jenkinsStatus}).Error("Jenkins retry")
-		    }
+			}
 			return
 		})
 		if webhookSenderr != nil {
-			logger.Error("Oh dear. What do we do here")
-			logger.WithFields(log.Fields{"Original Message": payload}).Error("Error Deconstructing msg")
+			logger.Error("Webhook Service not available. Sending to Topic")
+			contentPlus, constructErr := constructPubSubMsg(payload, githubEventheader, invokeToken)
+			if constructErr != nil {
+				logger.WithFields(log.Fields{"error": constructErr}).Fatal("Pubsub msg construction error")
+			}
+			sendToTopic(contentPlus)
 		}
 
-		logger.WithFields(log.Fields{"jenkins-url": jenkinsWebhookUrl}).Info("Message sent successfully")
+		logger.WithFields(log.Fields{"jenkins-url": jenkinsWebhookUrl}).Info("Webhook forwarded successfully")
 
 		mu.Lock()
 		defer mu.Unlock()
@@ -197,7 +201,7 @@ func constructHttpMsg(msg []byte) (content []byte, httpHeader string, invoke str
 func sendToJenkins(content []byte, githubSig string, githubEventheader string, invokeToken string) (string, error) {
 	logger.Info(jenkinsWebhookUrl + "?token=" + invokeToken)
 	//Send the request on to teh Jenkins Url
-	req, err := http.NewRequest("POST", jenkinsWebhookUrl + "?token=" + invokeToken, bytes.NewBuffer(content))
+	req, err := http.NewRequest("POST", jenkinsWebhookUrl+"?token="+invokeToken, bytes.NewBuffer(content))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Hub-Signature", githubSig)
 	req.Header.Set("X-Github-Event", githubEventheader)
@@ -206,7 +210,7 @@ func sendToJenkins(content []byte, githubSig string, githubEventheader string, i
 	response, err := client.Do(req)
 	if err != nil {
 		return "Jenkins Transport Error", err
-    }
+	}
 	defer response.Body.Close()
 
 	//test we are getting the correct status code
@@ -217,7 +221,6 @@ func sendToJenkins(content []byte, githubSig string, githubEventheader string, i
 
 	return "OK", nil
 }
-
 
 func retry(attempts int, sleep time.Duration, f func() error) (err error) {
 	for i := 0; ; i++ {
@@ -304,7 +307,6 @@ func sendToTopic(c []byte) {
 	logger.WithFields(log.Fields{"message-id": id}).Info("Message sent to topic successfully")
 	return
 }
-
 
 func logFatal(e error, desc string) {
 	if e != nil {
