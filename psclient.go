@@ -120,7 +120,7 @@ func main() {
 	// Start worker goroutine.
 	err = subscribe()
 	if err != nil {
-		logger.WithFields(log.Fields{"error": err}).Error("Failed to run subscribe routine")
+		logError(err,"Failed to run subscribe routine")
 	}
 
 }
@@ -138,13 +138,13 @@ func subscribe() error {
 		logger.WithFields(log.Fields{"X-Hub-Signature": gitXheader})
 
 		if err != nil {
-			logger.WithFields(log.Fields{"error": err}).Error("Error Deconstructing msg")
+			logError(err,"Error Deconstructing msg")
 		}
 
 		webhookSenderr := retry(retryCount, retryInterval, func() (err error) {
 			jenkinsStatus, err := sendToJenkins(payload, gitXheader, githubEventheader, invokeToken)
 			if err != nil {
-				logger.WithFields(log.Fields{"error": jenkinsStatus}).Error("Jenkins retry")
+				logError(errors.New(jenkinsStatus),"Jenkins retry")
 			}
 			return
 		})
@@ -152,7 +152,7 @@ func subscribe() error {
 			logger.Error("Webhook Service not available. Sending to Topic")
 			contentPlus, constructErr := constructPubSubMsg(payload, githubEventheader, invokeToken)
 			if constructErr != nil {
-				logger.WithFields(log.Fields{"error": constructErr}).Fatal("Pubsub msg construction error")
+				logError(constructErr,"Pubsub msg construction error")
 			}
 			sendToTopic(contentPlus)
 		}
@@ -176,7 +176,7 @@ func initPubClient() {
 	// client is initialized with context.Background()
 	client, err = pubsub.NewClient(ctx, projectID)
 	if err != nil {
-		logger.WithFields(log.Fields{"error": err}).Error("Failed to initialize pub sub client")
+		logError(err,"Failed to initialize pub sub client")
 	}
 
 }
@@ -184,13 +184,17 @@ func initPubClient() {
 func constructHttpMsg(msg []byte) (content []byte, httpHeader string, invoke string, err error) {
 	var readContent map[string]interface{}
 	err = json.Unmarshal([]byte(msg), &readContent)
+	if err != nil {
+    	logError(err,"Json unmarshaling error")
+		return nil, "", "", err
+	}
 	gitHubEvent := fmt.Sprint(readContent["X-Github-Event"])
 	invokeToken := fmt.Sprint(readContent["Token-Path"])
 	delete(readContent, "X-Github-Event")
 	contentPlus, jsonMarsherr := json.Marshal(readContent)
 	if jsonMarsherr != nil {
 		logger.WithFields(log.Fields{"Original Message": content}).Error("Json Marshalling")
-		logger.WithFields(log.Fields{"error": jsonMarsherr}).Fatal("Something went wrong with json marshalling")
+		logError(jsonMarsherr,"Json marshaling error")
 		return nil, "", "", jsonMarsherr
 	}
 
@@ -282,11 +286,15 @@ func getVaultSecret() (secret string) {
 func constructPubSubMsg(content []byte, eventType string, token string) (msg []byte, err error) {
 	var readContent map[string]interface{}
 	err = json.Unmarshal([]byte(content), &readContent)
+	if err != nil {
+    	logError(err,"Json unmarshaling error")
+		return nil, err
+	}
 	readContent["X-Github-Event"] = eventType
 	readContent["Token-Path"] = token
 	contentPlus, jsonMarsherr := json.Marshal(readContent)
 	if jsonMarsherr != nil {
-		logger.WithFields(log.Fields{"error": jsonMarsherr}).Error("Json marshaling error")
+		logError(jsonMarsherr,"Json marshaling error")
 		return nil, jsonMarsherr
 	}
 	return contentPlus, nil
@@ -305,7 +313,6 @@ func sendToTopic(c []byte) {
 		return
 	}
 	logger.WithFields(log.Fields{"message-id": id}).Info("Message sent to topic successfully")
-	return
 }
 
 func logFatal(e error, desc string) {
