@@ -127,6 +127,7 @@ func main() {
 
 func subscribe() error {
 	var mu sync.Mutex
+	counter := 0
 	sub := client.Subscription(subName)
 	ctx, cancel := context.WithCancel(ctx)
 	err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
@@ -161,7 +162,12 @@ func subscribe() error {
 
 		mu.Lock()
 		defer mu.Unlock()
-		defer cancel() //cancel ctx as soon as we return
+        //TODO - find a better way for this
+        //Currently means the container will restart after processing 10000 msgs
+        if counter >= 10000 {
+			cancel() 
+	    }
+	    counter ++
 	})
 	if err != nil {
 		return err
