@@ -204,8 +204,11 @@ func constructHttpMsg(msg []byte) (content []byte, httpHeader string, invoke str
 
 func sendToJenkins(content []byte, githubSig string, githubEventheader string, invokeToken string) (string, error) {
 	logger.Info(jenkinsWebhookUrl + "?token=" + invokeToken)
-	//Send the request on to teh Jenkins Url
+	//Send the request on to the Jenkins Url
 	req, err := http.NewRequest("POST", jenkinsWebhookUrl+"?token="+invokeToken, bytes.NewBuffer(content))
+	if err != nil {
+		return "HTTP Request Error", err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Hub-Signature", githubSig)
 	req.Header.Set("X-Github-Event", githubEventheader)
@@ -246,7 +249,10 @@ func retry(attempts int, sleep time.Duration, f func() error) (err error) {
 func ComputeHmac(message string, secret string) string {
 	key := []byte(secret)
 	hash := hmac.New(sha1.New, key)
-	hash.Write([]byte(message))
+	_, err := hash.Write([]byte(message))
+	if err != nil {
+		logFatal(err, "Hash Write")
+	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
