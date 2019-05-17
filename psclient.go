@@ -150,7 +150,7 @@ func hookProcessor(eventCh <-chan hookEvent) {
 		//validate we can parse the webhook
 		gEvent, err := github.ParseWebHook(event.gitHubEvent, event.payload)
 		if err != nil {
-			logger.WithFields(log.Fields{"error": err}).Error("Error process parsing incoming webhook")
+			logError(err,"Error process parsing incoming webhook")
 		} else {
 			switch gEvent.(type) {
 			case *github.PushEvent:
@@ -158,7 +158,7 @@ func hookProcessor(eventCh <-chan hookEvent) {
 				webhookSenderr := retry(retryCount, retryInterval, func() (err error) {
 					jenkinsStatus, err :=  sendToJenkins(event.payload, event.gitHubEvent, event.invokeKey)
 					if err != nil {
-						logger.WithFields(log.Fields{"error": err}).Error(jenkinsStatus)
+						logError(err,jenkinsStatus)
 					}
 					return
 				})
@@ -167,7 +167,7 @@ func hookProcessor(eventCh <-chan hookEvent) {
 					logger.WithFields(log.Fields{"error": webhookSenderr}).Error("Something went wrong with webhook forward to Jenkins. Sending to topic")
 					contentPlus, constructErr := constructPubSubMsg(event.payload, event.gitHubEvent, event.invokeKey)
 					if constructErr != nil {
-						logger.WithFields(log.Fields{"error": constructErr}).Fatal("Pubsub msg construction error")
+						logError(constructErr,"Pubsub msg construction error")
 					}
 					sendToTopic(contentPlus)
 				} else { //log successful Jenkins send
@@ -196,7 +196,7 @@ func processRequest(eventCh chan hookEvent) http.HandlerFunc {
 		//validate that our secret key matches what is in the headers
 		content, err := github.ValidatePayload(r, []byte(secret))
 		if err != nil {
-			logger.WithFields(log.Fields{"error": err}).Error("Error validating request body")
+			logError(err,"Error validating request body")
 			http.Error(w, "Error validating request body", http.StatusBadRequest)
 			return
 		}
@@ -217,11 +217,15 @@ func processRequest(eventCh chan hookEvent) http.HandlerFunc {
 func constructPubSubMsg(content []byte, eventType string, token string) (msg []byte, err error) {
 	var readContent map[string]interface{}
 	err = json.Unmarshal([]byte(content), &readContent)
+	if err != nil {
+    	logError(err,"Json unmarshaling error")
+		return nil, err
+	}
 	readContent["X-Github-Event"] = eventType
 	readContent["Token-Path"] = token
 	contentPlus, jsonMarsherr := json.Marshal(readContent)
 	if jsonMarsherr != nil {
-		logger.WithFields(log.Fields{"error": jsonMarsherr}).Error("Json marshaling error")
+		logError(jsonMarsherr,"Json marshaling error")
 		return nil, jsonMarsherr
 	}
 	return contentPlus, nil
@@ -230,6 +234,9 @@ func constructPubSubMsg(content []byte, eventType string, token string) (msg []b
 func sendToJenkins(content []byte, githubEvent string, invokeToken string) (string, error) {
 	//Send the request on to the Jenkins Url
 	req, err := http.NewRequest("POST", jenkinsWebhookUrl + "?token=" + invokeToken, bytes.NewBuffer(content))
+	if err != nil {
+		return "HTTP Request Error", err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Github-Event", githubEvent)
 
@@ -261,7 +268,6 @@ func sendToTopic(c []byte) {
 		return
 	}
 	logger.WithFields(log.Fields{"message-id": id}).Info("Message sent to topic successfully")
-	return
 }
 
 func retry(attempts int, sleep time.Duration, f func() error) (err error) {
@@ -287,10 +293,8 @@ func initPubClient() {
 	var err error
 	client, err = pubsub.NewClient(ctx, projectID)
 	if err != nil {
-		logger.WithFields(log.Fields{"error": err}).Error("Failed to initialize pub sub client")
+		logError(err,"Failed to initialize pub sub client")
 	}
-	return
-
 }
 
 func getVaultSecret() (secret string) {
