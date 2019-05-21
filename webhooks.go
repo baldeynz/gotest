@@ -46,9 +46,11 @@ var secret string
 // client is a global Pub/Sub client, initialized once per instance.
 var client *pubsub.Client
 var ctx = context.Background()
+var topic *pubsub.Topic 
 
 func main() {
 	//get required Env Vars and fail pod start if we dont
+	//TODO - this is cumbersome, find a better way
 	projectID = os.Getenv("GCP_PROJECT")
 	if projectID == "" {
 		logger.Fatal("Failed to get GCP_PROJECT")
@@ -114,9 +116,12 @@ func main() {
 	//we call getVaultSecret here so we dont start the pod if we fail it
 	secret = getVaultSecret()
 
-	initPubClient()
+	client, err = initPubClient(projectID)
+	if err != nil {
+		logFatal(err,"Failed to initialize pub sub client")
+	}
 
-	// define a channel `eventChannel` it will send/receive hookEvents
+	// define a channel `eventChannel` it will send/receive hookEvents with a buffer, will block once that buffer is full
 	eventChannel := make(chan hookEvent, 100)
 
 	// fire up a new goroutine in the background for processing hook events
@@ -129,7 +134,6 @@ func main() {
 		WriteTimeout: 5 * time.Second,
 	}
 
-	//srv.HandleFunc("/webhooks", WebhookHandler)
 	logger.Info("Server Started")
 	logger.Fatal(srv.ListenAndServe())
 }
@@ -156,11 +160,12 @@ func hookProcessor(eventCh <-chan hookEvent) {
 			case *github.PushEvent:
 				//try and send on to Jenkins
 				webhookSenderr := retry(retryCount, retryInterval, func() (err error) {
-					jenkinsStatus, err :=  sendToJenkins(event.payload, event.gitHubEvent, event.invokeKey)
-					if err != nil {
-						logError(err,jenkinsStatus)
+					JenkinsErr :=  sendToJenkins(event.payload, event.gitHubEvent, jenkinsWebhookUrl + "?token=" + event.invokeKey)
+					if JenkinsErr != nil {
+						logError(JenkinsErr, "Jenkins Transport Error")
+						return JenkinsErr
 					}
-					return
+					return nil
 				})
 				//if jenkins send/retries are exhausted then we need to add the X-Github-Event and Token to the message and send to Topic
 				if webhookSenderr != nil {
@@ -169,7 +174,10 @@ func hookProcessor(eventCh <-chan hookEvent) {
 					if constructErr != nil {
 						logError(constructErr,"Pubsub msg construction error")
 					}
-					sendToTopic(contentPlus)
+					err := sendToTopic(contentPlus, client, topicName)
+					if err != nil {
+						logFatal(err, "Could not publish message to topic")
+					}
 				} else { //log successful Jenkins send
 					logger.WithFields(log.Fields{"jenkins-url": jenkinsWebhookUrl + "?token=" + event.invokeKey}).Info("Webhook forwarded to Jenkins")
 				}
@@ -231,11 +239,11 @@ func constructPubSubMsg(content []byte, eventType string, token string) (msg []b
 	return contentPlus, nil
 }
 
-func sendToJenkins(content []byte, githubEvent string, invokeToken string) (string, error) {
+func sendToJenkins(content []byte, githubEvent string, url string) (error) {
 	//Send the request on to the Jenkins Url
-	req, err := http.NewRequest("POST", jenkinsWebhookUrl + "?token=" + invokeToken, bytes.NewBuffer(content))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(content))
 	if err != nil {
-		return "HTTP Request Error", err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Github-Event", githubEvent)
@@ -243,31 +251,37 @@ func sendToJenkins(content []byte, githubEvent string, invokeToken string) (stri
 	client := &http.Client{}
 	response, err := client.Do(req)
 	if err != nil {
-		return "Jenkins Transport Error", err
+		return err
 	}
 	defer response.Body.Close()
 
 	//test we are getting the correct status code
 	if response.StatusCode != http.StatusOK {
-		return jenkinsWebhookUrl + "?token=" + invokeToken + " Response Error", errors.New(strconv.Itoa(response.StatusCode))
+		return errors.New(strconv.Itoa(response.StatusCode))
 	}
 
-	return "OK", nil
+	return nil
 }
 
-func sendToTopic(c []byte) {
+func sendToTopic(c []byte, psclient *pubsub.Client, topicName string) (error) {
 	//publish the message
 	m := &pubsub.Message{
 		Data: []byte(c),
 	}
-
-	id, err := client.Topic(topicName).Publish(ctx, m).Get(ctx)
+	//create the topic if it doesnt exist - for testing purposes
+    topic, err := psclient.CreateTopic(ctx, topicName)
 	if err != nil {
-		logger.WithFields(log.Fields{"topic": topicName, "error": err}).Error("Topic publish error")
+		logError(err, "Topic already exists, creation failed")
+		topic = psclient.Topic(topicName)
+	}
+	id, err := topic.Publish(ctx, m).Get(ctx)
+	if err != nil {
+		logger.WithFields(log.Fields{"topic": topic, "error": err}).Error("Topic publish error")
 		logger.WithFields(log.Fields{"message": string(c)}).Error("Topic publish error")
-		return
+		return err
 	}
 	logger.WithFields(log.Fields{"message-id": id}).Info("Message sent to topic successfully")
+	return nil
 }
 
 func retry(attempts int, sleep time.Duration, f func() error) (err error) {
@@ -288,13 +302,14 @@ func retry(attempts int, sleep time.Duration, f func() error) (err error) {
 	return fmt.Errorf("after %d attempts, last error: %s", attempts, err)
 }
 
-func initPubClient() {
+func initPubClient(project string) (*pubsub.Client, error) {
 	// err is pre-declared to avoid shadowing client.
 	var err error
-	client, err = pubsub.NewClient(ctx, projectID)
+	newClient, err := pubsub.NewClient(ctx, project)
 	if err != nil {
-		logError(err,"Failed to initialize pub sub client")
+		return nil, err
 	}
+    return newClient, nil
 }
 
 func getVaultSecret() (secret string) {
