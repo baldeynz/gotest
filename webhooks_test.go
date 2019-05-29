@@ -5,13 +5,12 @@ import (
 	"cloud.google.com/go/pubsub/pstest"
 	"context"
 	"encoding/json"
-	"errors"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
-	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -22,6 +21,24 @@ const (
 	retries   = 2
 )
 
+func TestLoadVars(t *testing.T) {
+	ev := map[string]string{
+		"GCP_PROJECT":       "a-project",
+		"JENKINS_URL":       "https://jenkins.jenkins:8080",
+		"VAULT_SECRET_PATH": "secret/blah",
+		"RETRY_INTERVAL":    "5",
+		"RETRY_COUNT":       "2",
+		"SUBSCRIPTION_NAME": "sub",
+		"TOPIC_NAME":        "topic",
+		"VAULT_ADDRESS":     "https://anaddress:8200",
+		"VAULT_ROLE":        "role",
+	}
+	for k, v := range ev {
+		os.Setenv(k, v)
+	}
+	envars := loadVars()
+	assert.Equal(t, envars.ProjectID, ev["GCP_PROJECT"])
+}
 
 func TestSendToTopic(t *testing.T) {
 	ctx := context.Background()
@@ -31,24 +48,27 @@ func TestSendToTopic(t *testing.T) {
 	// Connect to the server without using TLS.
 	conn, err := grpc.Dial(srv.Addr, grpc.WithInsecure())
 	if err != nil {
-		// TODO: Handle error.
+		t.Fatalf("failed to dial pstest server: %v", err)
 	}
 	defer conn.Close()
 	// Use the connection when creating a pubsub client.
 	client, err := pubsub.NewClient(ctx, "project", option.WithGRPCConn(conn))
 	if err != nil {
-		log.Println(err)
+		t.Fatalf("failed creating pubsub client: %v", err)
 	}
 	defer client.Close()
-    
-    //No error is returned from sendToTopic
-	assert.Nil(t, sendToTopic([]byte("Test Message"), client, "testTopic"))
-	
+
+	top, err := client.CreateTopic(ctx, "testTopic")
+	if err != nil {
+		t.Fatalf("failed creating topic: %v", err)
+	}
+	defer top.Stop()
+
+	//No error is returned from sendToTopic
+	assert.Nil(t, sendToTopic(ctx, client, []byte("Test Message"), "testTopic"))
+
 }
 
-func TestLogError(t *testing.T){
-	logError(errors.New("Error"), "Test Error")
-}
 
 //Tests that the constructPubSubMsg func returns with the correct headers added
 func TestConstructPubSubMsg(t *testing.T) {
@@ -61,13 +81,13 @@ func TestConstructPubSubMsg(t *testing.T) {
 
 	contentTest, err := json.Marshal(W{})
 	if err != nil {
-		log.Println(err)
+		t.Fatalf("failed json marshal : %v", err)
 	}
 	output, _ := constructPubSubMsg(contentTest, eventType, token)
 	var cReturned WebhookPlus
 	err = json.Unmarshal(output, &cReturned)
 	if err != nil {
-		log.Println(err)
+		t.Fatalf("failed json unmarshal : %v", err)
 	}
 
 	assert.Equal(t, eventType, cReturned.XGithubEvent)
@@ -87,7 +107,7 @@ func TestSendToJenkins(t *testing.T) {
 
 	err := sendToJenkins(nil, eventType, server.URL)
 	if err != nil {
-		log.Println(err)
+		t.Fatalf("send to jenkins error : %v", err)
 	}
 }
 
@@ -110,8 +130,6 @@ func TestRetry(t *testing.T) {
 	})
 
 	if err != nil {
-		log.Println(err)
 		assert.Equal(t, "after 2 attempts, last error: 400", err.Error())
 	}
-	//assert.Equal(t,"after 2 attempts, last error: 400",webhookSenderr.Error())
 }
